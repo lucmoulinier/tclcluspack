@@ -1,0 +1,193 @@
+tclcluspack 0.1 - corrections (2026-09-26)
+==========================================
+
+Sources d'origine conservees dans generic.orig/ (configure d'origine : configure.orig-win).
+
+Compilation Linux
+-----------------
+- configure.ac : librairie Rmath choisie selon la plateforme
+  (lib/Rmath-linux-x86_64.a, -macosx-, -win32-) au lieu de lib/Rmath.a
+  (qui est la version Windows). configure regenere avec autoconf.
+- Compilation hors-source :
+    mkdir build-linux && cd build-linux
+    ../configure --with-tcl=/home/moumou/tcl/lib --prefix=/home/moumou/tcl
+    make            # make install pour installer dans /home/moumou/tcl/lib
+  Attention : les Makefiles TEA ne suivent pas les .h -> "make clean" apres
+  modification d'un en-tete.
+
+Plantages corriges
+------------------
+- Melange malloc/free et ckalloc/ckfree entre fichiers ("alloc: invalid block",
+  abort) : tout le code passe par ckalloc/ckfree (sauf bionj.c, autonome).
+- Tclcluspack sans argument, ou option sans valeur : lecture hors de objv.
+- -cm bionj : le fichier de distances n'etait plus ecrit (ligne commentee) ;
+  bionj lisait "toto.dst" et demandait un nom de fichier sur stdin.
+  -> fichiers temporaires uniques (mkstemp, $TMPDIR), supprimes apres usage.
+  Aussi "typeDonnees=DISTANCES" (affectation) au lieu de "==".
+- Alignement : le nom de chaque sequence pointait dans la chaine Tcl puis etait
+  libere par ckfree -> corruption memoire.
+- -cm hierar -nbc secator sur alignement : l'alignement etait traite comme des
+  distances (dimension -1) -> segfault. Les distances ne sont utilisees que pour bionj.
+- -dt distances : lisait un fichier dont le nom n'etait jamais initialise.
+  -> la matrice est maintenant passee en liste Tcl : {{nom d1 ... dn} ...}
+- -dt newick sans feuille "fictive_sequence" : pointeur non initialise -> segfault.
+  -> message d'erreur.
+- clusteringMixtureModels : champ "destroy" non initialise chez tous les
+  appelants (double liberation dans kkmeans/kmm, boucle infinie dans emm).
+- densityEstimation : debordement (une composante de trop) et variable non
+  initialisee.
+- symeig/tql2 : lecture de e[n] et boucle sans fin en presence de NaN.
+- -standardization : exit(1) (tuait l'application) si un ecart-type est nul.
+
+Resultats faux corriges
+-----------------------
+- -cm mm -nbc <n> : nombre de clusters renvoye = variable non initialisee.
+- -cm mm sur alignement/distances : renvoyait toujours 1 groupe.
+- Filtrage -fd sur alignement (hors bionj) : lisait des coordonnees MDS comme
+  des pourcentages d'identite (valeurs indefinies).
+- Alignement : la derniere colonne etait ignoree ; les residus en minuscules
+  etaient traites comme des gaps.
+- -cm kmm : arguments decales dans l'appel (nbPivots, methode d'estimation).
+- -wc : coordonnees non initialisees renvoyees pour alignement/distances/newick.
+- -estim moments positionnait EXPONENTIAL au lieu de MOMENTS.
+
+Interface Tcl
+-------------
+- Messages d'erreur explicites (option inconnue, valeur manquante ou invalide,
+  combinaison -cm/-nbc incoherente, ligne de coordonnees mal formee...).
+- -cm est obligatoire (sauf -dt newick). Defauts inchanges : -dt coordinates,
+  -nbc dpc.
+- Plus de printf de debug sur stdout (recompiler avec -DCLUSPACK_VERBOSE pour
+  les retrouver). -DCLUSPACK_SYSTEM_MALLOC remplace ckalloc par malloc pour
+  AddressSanitizer / valgrind.
+
+Tests
+-----
+  tests/run.sh build-linux              # 37 cas, un processus par cas
+  tclsh8.6 tests/stress.tcl build-linux # appels repetes (stabilite, memoire)
+Passe AddressSanitizer sans erreur. Fuites residuelles connues : ~640 octets
+par appel bionj/newick (2 noeuds detaches a l'enracinement) et quelques Ko pour
+les methodes experimentales emm, kkmeans, kmm.
+
+Portage Tcl 9 (2026-09-26)
+==========================
+Suivant https://core.tcl-lang.org/tcl/wiki?name=Migrating+C+extensions+to+Tcl+9
+(meme demarche que tclordalie0.1). Originaux sauvegardes en *.pre_tcl9
+(configure.ac, configure, Makefile.in, pkgIndex.tcl.in, tclconfig/, generic/).
+
+- tclconfig/tcl.m4 : TEA 3.10 -> 3.13 ; configure.ac : TEA_INIT(),
+  AC_CONFIG_FILES + AC_OUTPUT ; configure regenere (autoconf 2.71).
+- Librairie : libtclcluspack0.1.so (Tcl 8) / libtcl9tclcluspack0.1.so (Tcl 9) ;
+  pkgIndex.tcl charge celle qui correspond a l'interpreteur.
+- mainClusPack.h : bloc de compatibilite Tcl_Size / TCL_SIZE_MAX /
+  TCL_SIZE_MODIFIER pour compiler les memes sources avec Tcl 8.6 et Tcl 9.
+- Longueurs de listes et de chaines en Tcl_Size (TclDataIn.c,
+  mainClusPackTcl.c : ElementsListe) ; erreur Tcl si > INT_MAX, le code
+  ClusPack travaillant en int.
+- CONST -> const (macro supprimee en Tcl 9).
+- Tcl_InitStubs / Tcl_PkgRequire "8.5-10" ; code retour de Tcl_PkgProvide
+  et de TraitementAlignement verifies.
+
+Compilation Tcl 9 :
+    mkdir build-tcl9 && cd build-tcl9
+    ../configure --with-tcl=/home/moumou/tcl9/lib \
+                 --with-tclinclude=/home/moumou/tcl9/include --prefix=/home/moumou/tcl9
+    make
+Tests : TCLSH=/home/moumou/tcl9/bin/tclsh9.0 tests/run.sh build-tcl9
+37 cas OK en Tcl 8.6 et Tcl 9, AddressSanitizer sans erreur en Tcl 9.
+Les resultats de kmeans/kmm varient d'un lancement a l'autre (graine = getpid()),
+en Tcl 8 comme en Tcl 9.
+
+Modeles de melange -cm mm (2026-09-26, soir)
+============================================
+Constat dans Ordali (mode Cluster, "mixture model / BIC") : 1 seul groupe
+pour la plupart des criteres. Sauvegardes : generic/*.c.bak_20260926_17*.
+
+- mixtureModels.c : penalite BIC gaussienne = p.ln(n) au lieu de p.ln(n)/2
+  (on maximise logL - penalite ; les branches spherique et simplex avaient
+  deja le 1/2). BIC etait donc deux fois trop severe.
+- mixtureModels.c : le nombre de parametres ignorait -diag : covariance
+  diagonale = 2d parametres par cluster, et non d(d+3)/2 (d > 20 => diag
+  par defaut ; 165 dimensions => 330 au lieu de 13860 parametres).
+- matrice.c : inversionMatrice prenait le premier pivot > 1e-8 (pas de pivot
+  partiel) et, si la matrice etait singuliere, renvoyait log(det) = 0 avec une
+  matrice a moitie reduite (et une fuite memoire). Nouvelle
+  inversionMatriceSinguliere (pivot partiel, seuil relatif, signale la
+  singularite) ; inversionMatrice garde son comportement pour les autres
+  appelants.
+- emGaussian.c, emSphericalGaussian.c : covariance d'un cluster singuliere
+  (ex. compositions en acides amines, dont la somme vaut 1) => regularisation
+  (ajout de 1e-6 x variance moyenne a la diagonale, x10 jusqu'a inversibilite,
+  inversionMatriceRegularisee). Avant, les densites gaussiennes etaient
+  fausses et seule la composante "bruit" comptait : meme log-vraisemblance
+  pour tout k, donc 1 groupe (AIC comme BIC).
+- emGaussian.c : densite uniforme (bruit) : une dimension constante donnait
+  log(0).
+
+Tests ajoutes : gauss1d_mm_bic/aic (3 gaussiennes 1D proches : l'ancien BIC
+trouvait 1 groupe), compo_mm_bic/aic (compositions de somme 1 : 1 groupe
+avant). 41 cas OK en Tcl 8.6 et Tcl 9, AddressSanitizer sans erreur.
+
+Limites connues (non modifiees) :
+- une seule initialisation k-means par valeur de k : log-vraisemblance non
+  monotone en k et choix de k variable d'un lancement a l'autre ;
+- k teste de 1 a nbClustersMax-1 (boucle i<nbClustersMax) ;
+- donnees de grande dimension tres correlees (ex. profils d'identite 165 x 165
+  d'Ordali) : le modele diagonal les traite comme independantes, BIC/AIC
+  choisissent alors le k maximal teste.
+
+2026-09-26 (soir, suite)
+- mainClusPackTcl.c : -diag non precise => covariance diagonale aussi quand
+  nbIndividus <= nbDimensions. En covariance pleine, kmixtureModels exige au
+  moins d+1 individus par cluster : impossible des k=1, donc "mixture model
+  clustering failed (EM did not converge)" pour tout k (cas Ordali : 17
+  sequences avec residus dans la zone 10-60, composition en acides amines =
+  20 dimensions). -diag 0 explicite garde l'erreur.
+Tests ajoutes : fewind_mm_bic/aic (15 individus, 20 dimensions),
+err_fewind_mm_diag0. 44 cas OK en Tcl 8.6 et Tcl 9 ; ASan : pas d'erreur
+memoire (fuites residuelles connues bionj/newick/emm/kkmeans/kmm seulement).
+
+Kernel k-means -cm kkmeans (2026-10-08)
+=======================================
+Constat : sur 3 nuages bien separes (cas coord_kkmeans_3), groupes de
+tailles 58/1/1, ou un seul groupe, selon le lancement. Sauvegardes :
+generic/*.bak_20261008, tests/cases.tcl.bak_20261008.
+
+- Bandwidth (kernels.c, nouvelle fonction calculPilotAdaptiveBandwidth) :
+  calculMMDensityBandwidth donnait h_i = (f_i/G)^-1/2 sans bandwidth global
+  (h = 1 dans l'unite des donnees, quelle que soit leur echelle), et la
+  densite f_i (mixtureModelDensityEstimation) ignorait la composante bruit :
+  un nuage absorbe par le bruit avait f_i ~ 1e-100, d'ou des inverseBandwidth
+  de 1e-100 a 1e+55 et un noyau nul entre points distincts. Maintenant :
+  h0^2 = mediane des distances au carre / 2, densite pilote a noyau
+  gaussien (bandwidth h0), puis h_i = h0 (f_i/G)^-1/2 (Abramson).
+  Le modele de melange (jamais libere) n'est plus calcule pour kkmeans ;
+  inverseBandwidth est libere apres usage.
+- kernelKmeans.c :
+  . germes tires par floor(n-1)*runif : dernier individu jamais tire, boucle
+    sans fin si nbClusters >= nbIndividus -> initialisation k-means++ dans
+    l'espace du noyau ;
+  . groupe vide : division par zero, inertie NaN, plus aucune affectation
+    ne changeait -> groupes vides ignores ;
+  . la meilleure solution etait ecrasee sans comparaison au debut de chaque
+    relance, et la solution convergee n'etait pas enregistree -> comparaison
+    apres chaque relance ;
+  . arret quand plus aucun individu ne change de groupe ; 10 relances au
+    lieu de 2, 100 iterations au maximum.
+- mainClusPackTcl.c : -nbc superieur au nombre d'individus -> erreur Tcl ;
+  echec de kernelKmeans -> erreur Tcl.
+
+Tests ajoutes : coord_kkmeans_3_x1000 (memes nuages x1000 : l'ancien code
+echouait systematiquement), ali_kkmeans_3, err_kkmeans_toomany.
+47 cas OK en Tcl 8.6 et Tcl 9 ; ASan : pas d'erreur, plus de fuite pour
+kkmeans.
+
+Non modifie : -cm kmm utilise toujours mixtureModelDensityEstimation +
+calculMMDensityBandwidth (memes bandwidths aberrants ; coord_kmm_3 renvoie
+souvent 1 seul groupe). Le noyau gaussien avec h0 = distance mediane ne
+separe pas des anneaux concentriques (il se comporte alors comme k-means).
+
+Compilation : les .o laisses a la racine par un configure/make dans les
+sources (makeall.tcl) sont trouves par VPATH et cassent l'edition de liens
+des builds hors-source ("cannot find treecut.o"). Contournement :
+    make VPATH=../generic
